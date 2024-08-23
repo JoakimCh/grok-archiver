@@ -12,7 +12,7 @@ const log = (...args) => {
   const d = new Date()
   console.log(`[${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}]`, ...args)
 }
-const storedPrompts = new Map()
+const storedDetails = new Map()
 const archivedImages = new Set()
 let cfg, cdp
 
@@ -56,8 +56,19 @@ await initializeIntercept()
 
 async function initializeIntercept() {
   logInfo('Connecting to the Chrome DevTools Protocol... ')
-
-  const {info} = await initChrome(cfg)
+  const {info} = await (async () => {
+    try {
+      return await initChrome(cfg)
+    } catch (error) {
+      if (error.toString().startsWith(`Error: Can't connect to the DevTools protocol`)) {
+        console.error(`Could not connect. This usually means that your browser was already running (but without having the CDP port set). If that's the case just close it and run this program again, it will then launch it for you with the correct CDP port configured.`)
+      } else {
+        console.error(error)
+        console.error(`Something went wrong when launching (or connecting to) your browser. Is this the correct path? "${cfg.chromiumPath}"\nIf not then change it in "config.json".`)
+      }
+      process.exit(1)
+    }
+  })()
   const {webSocketDebuggerUrl} = info
   const sessions = new Map()
 
@@ -82,6 +93,7 @@ async function initializeIntercept() {
             {urlPattern: '*attachment.json?mediaId*', requestStage: 'Response'},
             // https://api.x.com/2/grok/add_response.json
             {urlPattern: '*add_response.json', requestStage: 'Response'},
+            {urlPattern: '*GrokConversationItemsByRestId*', requestStage: 'Response'},
           ]
         })
       }
@@ -103,66 +115,16 @@ async function initializeIntercept() {
         return log(`Bad response code ${responseStatusCode}): ${request.url}`)
       }
       const headers = new Headers(responseHeaders.map(({name, value}) => [name, value]))
-      if (request.url.endsWith('add_response.json')) {
-        // this stops the streaming of this response to the browser, it's gonna be delivered all at once
-        cdp.send('Fetch.getResponseBody', {requestId}, sessionId).then(({body, base64Encoded}) => {
-          if (base64Encoded) {
-            body = Buffer.from(body, 'base64').toString()
-          }
-          let prompt, imgId
-          // console.log(body)
-          const blocks = parseJsonBlocks(body)
-          for (const block of blocks) {
-            const {result} = block
-            if (result?.responseType == 'image') {
-              prompt = result.query
-            }
-            if (result?.imageAttachment?.mediaId) {
-              imgId = result.imageAttachment.mediaId
-            }
-          }
-          if (imgId) {
-            log(`Got prompt for ${imgId}: ${prompt}`)
-            storedPrompts.set(imgId, prompt)
-          }
-        })
-        return
-      } // yeah, early return here
-
-      if (headers.get('content-type') != 'image/jpeg') {
-        return log(`Bad content-type (${headers.get('content-type')}): ${request.method})`)
-      }
-      // const date = new Date(headers.get('date')) // not of image
       const url = new URL(request.url)
-      const imgId = url.searchParams.get('mediaId')
-      if (archivedImages.has(imgId)) {
-        return
+      switch (url.pathname.split('/').at(-1)) {
+        default: log(url.pathname.split('/').at(-1)); break
+        case 'add_response.json': 
+          return handle_add_response_json({url, headers, requestId, sessionId})
+        case 'attachment.json':
+          return handle_attachment_json({url, headers, requestId, sessionId})
+        case 'GrokConversationItemsByRestId':
+          return handle_GrokConversationItemsByRestId({url, headers, requestId, sessionId})
       }
-      // I don't await it
-      cdp.send('Fetch.getResponseBody', {requestId}, sessionId).then(({body, base64Encoded}) => {
-        if (!base64Encoded) {
-          return log(`Not base64Encoded: ${imgId}`)
-        }
-        const imgData = Buffer.from(body, 'base64')
-        if (imgData.byteLength == 0) {
-          return log(`Zero length: ${imgId}`) // then we can fetch them instead
-        }
-        const prompt = storedPrompts.get(imgId) || ''
-        storedPrompts.delete(imgId)
-        log(`Archiving: ${imgId} - ${prompt || '[prompt unknown]'}`)
-        const date = Math.trunc(Date.now() / 1000) // unix time
-        const path = `${cfg.archivePath}/images/${dateDir(date)}/${imgFilename({imgId, prompt})}.jpg`
-        ensureDirectory(path)
-        fs.writeFileSync(path, imgData)
-        archivedImages.add(imgId)
-        { // archive record
-          const path = `${cfg.archivePath}/database/${dateDir(date)}/${imgId}.json`
-          ensureDirectory(path)
-          fs.writeFileSync(path, JSON.stringify({
-            date, imgId, prompt
-          }, null, 2))
-        }
-      })
     } catch (error) {
       log(error)
     } finally { // so even if we return this will be done
@@ -178,6 +140,96 @@ async function initializeIntercept() {
     filter: [{type: 'page'}]
   })
 }
+
+function handle_attachment_json({url, headers, requestId, sessionId}) {
+  if (headers.get('content-type') != 'image/jpeg') {
+    return log(`Bad content-type (${headers.get('content-type')}): ${request.method})`)
+  }
+  // const date = new Date(headers.get('date')) // not of image
+  const imgId = url.searchParams.get('mediaId')
+  if (archivedImages.has(imgId)) {
+    return
+  }
+  cdp.send('Fetch.getResponseBody', {requestId}, sessionId).then(({body, base64Encoded}) => {
+    if (!base64Encoded) {
+      return log(`Not base64Encoded: ${imgId}`)
+    }
+    const imgData = Buffer.from(body, 'base64')
+    if (imgData.byteLength == 0) {
+      return log(`Zero length: ${imgId}`) // then we could fetch them instead
+    }
+    const {
+      prompt = '', 
+      unixtime = Math.trunc(Date.now() / 1000)
+    } = storedDetails.get(imgId) || {}
+    storedDetails.delete(imgId)
+    log(`Archiving: ${imgId} - ${prompt || '[prompt unknown]'}`)
+    const path = `${cfg.archivePath}/images/${dateDir(unixtime)}/${imgFilename({imgId, prompt})}.jpg`
+    ensureDirectory(path)
+    fs.writeFileSync(path, imgData)
+    archivedImages.add(imgId)
+    { // archive record
+      const path = `${cfg.archivePath}/database/${dateDir(unixtime)}/${imgId}.json`
+      ensureDirectory(path)
+      fs.writeFileSync(path, JSON.stringify({
+        unixtime, imgId, prompt
+      }, null, 2))
+    }
+  })
+}
+
+function handle_add_response_json({url, headers, requestId, sessionId}) {
+  // this stops the streaming of this response to the browser, it's gonna be delivered all at once
+  cdp.send('Fetch.getResponseBody', {requestId}, sessionId).then(({body, base64Encoded}) => {
+    if (base64Encoded) {
+      body = Buffer.from(body, 'base64').toString()
+    }
+    let prompt, imgId
+    // console.log(body)
+    const blocks = parseJsonBlocks(body)
+    for (const block of blocks) {
+      const {result} = block
+      if (result?.responseType == 'image') {
+        prompt = result.query
+      }
+      if (result?.imageAttachment?.mediaId) {
+        imgId = result.imageAttachment.mediaId
+      }
+    }
+    if (imgId) {
+      // log(`Got prompt for ${imgId}: ${prompt}`)
+      storedDetails.set(imgId, {prompt})
+    }
+  })
+}
+
+function handle_GrokConversationItemsByRestId({url, headers, requestId, sessionId}) {
+  cdp.send('Fetch.getResponseBody', {requestId}, sessionId).then(({body, base64Encoded}) => {
+    if (base64Encoded) {
+      body = Buffer.from(body, 'base64').toString()
+    }
+    const data = JSON.parse(body)
+    if (data?.data?.grok_conversation_items_by_rest_id?.items) {
+      for (const {message, media_urls, created_at_ms} of data.data.grok_conversation_items_by_rest_id.items) {
+        if (media_urls) {
+          // log('image found')
+          for (const media_url of media_urls) {
+            const start = media_url.lastIndexOf('mediaId=')
+            if (start) {
+              const imgId = media_url.slice(start+8)
+              const prompt = message.slice(39, -2)
+              storedDetails.set(imgId, {
+                prompt, unixtime: Math.trunc(created_at_ms/1000)
+              })
+              // log(imgId, prompt)
+            }
+          }
+        }
+      }
+    }
+  })
+}
+
 
 function parseJsonBlocks(text) {
   if (!text.startsWith('{')) {
@@ -279,7 +331,7 @@ function detectArchivedImages() {
         continue
       }
       if (entry.isFile && entry.name.endsWith('.json')) {
-        const imgId = entry.name
+        const imgId = entry.name.slice(0, -5) // without .json
         archivedImages.add(imgId)
       }
     }

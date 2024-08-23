@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "grok-archiver",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "author": "Joakim L. Christiansen (https://joakimch.github.io)",
   "license": "MIT",
   "bin": "./grok-archiver.js",

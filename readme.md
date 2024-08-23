@@ -1,9 +1,23 @@
 
 # JLC's X's Grok Archiver
 
-It works by intercepting the communication between the browser (which MUST be [Chromium based](https://www.google.com/search?q=chromium+based+browsers)) and the X/Grok website to fetch the images and the related details.
+## What is it?
 
-It will fetch any new images you generate while the archiver is running or any images found in the chat history.
+It's an archiver for [X's Grok](https://x.com/i/grok) AI generated images generated through its chat interface on the X website.
+
+> I am in no way affiliated with the people behind the X website (or the Grok AI) by the way! I am just a hobby programmer doing this work for free in my spare time!
+
+## How does it work?
+
+It works by intercepting the communication between the browser (which MUST be [Chromium based](https://www.google.com/search?q=chromium+based+browsers)) and the X website to fetch the images and any related details.
+
+It will fetch any new images you generate while the archiver is running and any images found in the chat history.
+
+## Why doesn't it work?
+
+It you experience any bugs or it not working properly on your operating system this is because I am just one person developing this software and I have only tested it on my Linux PC. 
+
+I'll happily fix any bugs encountered, just create a new "issue" in the GitHub repository and document it there (and I'll probably figure out how to fix it soon).
 
 ## How to run it?
 
@@ -30,11 +44,9 @@ I suspect these values will work (if you use Chrome):
 | macOS | ~/Library/Application Support/Google/Chrome |
 | Windows | C:\Program Files\Google\Chrome\Application\chrome.exe
 
-### Why must it be Chromium based?
+## Why must the browser be Chromium based?
 
-This is because my archiver is using the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) to do its magic. This allows my program to interact with the OpenAI APIs (and intercept communication) without them being able to use naughty tricks to block it.
-
-> Since it's pretty much hopeless today to write a program that perfectly emulates a browser this is just how I have to do it...
+This is because my archiver is using the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) to do its magic. This allows my program to easily intercept communication with their website.
 
 ## What's the structure of the archive?
 
@@ -60,7 +72,7 @@ Any truncated prompt is followed by … ([U+2026](https://en.wikipedia.org/wiki/
 
 The "database" directory is where records are kept for every image which has been archived. This system allows you to delete or rename the downloaded images while still keeping a record to avoid them being re-downloaded.
 
-Also more details about the images can be stored in those records (for now I just store the prompt when available).
+Also more details about the images are stored in those records.
 
 Looking up details for a specific image in the database is very easy to do using the search function in your file explorer. Just copy the "imageId" part of the image and search the database directory for the record (which is a .json file).
 
@@ -68,8 +80,6 @@ Looking up details for a specific image in the database is very easy to do using
 
 I am at the moment chronically sick, without a job, with tons of debt, two kids and a wife (which I can't support economically). So please [sponsor my efforts](https://github.com/sponsors/JoakimCh) to develop and maintain a working solution like this, I would really appreciate it if you did! ❤️
 
-## The end, of the readme that is...
+## The end (of the readme).
 
-If you want to get in touch you can find me on Twitter/X as [HolyGodCow](https://twitter.com/HolyGodCow).
-
-> Please wake up and realize that you're God roleplaying as a human!
+If you want to get in touch you can find me on X as [HolyGodCow](https://twitter.com/HolyGodCow).

@@ -7,6 +7,7 @@ import {createRequire} from 'module'
 const require = createRequire(import.meta.url)
 const {version} = require('./package.json')
 
+const debug = process.env['DEBUG'] ? (...args) => console.log(...args) : () => {} 
 const logInfo = console.log
 const log = (...args) => {
   const d = new Date()
@@ -58,6 +59,8 @@ async function initializeIntercept() {
   logInfo('Connecting to the Chrome DevTools Protocol... ')
   const {info} = await (async () => {
     try {
+      // see: https://github.com/JoakimCh/grok-archiver/issues/1
+      cfg.chromiumArgs = [`--auto-open-devtools-for-tabs`, `https://x.com/i/grok`]
       return await initChrome(cfg)
     } catch (error) {
       if (error.toString().startsWith(`Error: Can't connect to the DevTools protocol`)) {
@@ -80,26 +83,36 @@ async function initializeIntercept() {
   cdp.on('Target.targetInfoChanged', monitorTargetOrNot)
 
   async function monitorTargetOrNot({targetInfo: {targetId, url, type}}) {
+    // debug('monitor?', type, url)
     if (type == 'page' && (url.startsWith('https://x.com/i/grok'))) {
       if (!sessions.has(targetId)) {
+        debug('start monitor: ', targetId, url)
         const session = cdp.newSession({targetId})
         sessions.set(targetId, session)
         session.once('detached', () => {
           sessions.delete(targetId)
+          debug('stop monitor: ', targetId, url)
         })
-        await session.ready // any errors will throw here
-        await session.send('Fetch.enable', {
+        try {
+          await session.ready // any errors will throw here
+        } catch (error) { // e.g. if target has been destroyed
+          sessions.delete(targetId)
+          return
+        }
+        // await session.send('Console.enable')
+        session.send('Fetch.enable', {
           patterns: [
-            {urlPattern: '*attachment.json?mediaId*', requestStage: 'Response'},
+            // {requestStage: 'Response'}, // all
             // https://api.x.com/2/grok/add_response.json
             {urlPattern: '*add_response.json', requestStage: 'Response'},
+            {urlPattern: '*attachment.json?mediaId*', requestStage: 'Response'},
             {urlPattern: '*GrokConversationItemsByRestId*', requestStage: 'Response'},
           ]
-        })
+        }).catch(error => debug(error))
       }
     } else {
       if (sessions.has(targetId)) {
-        sessions.get(targetId).detach()
+        sessions.get(targetId).detach().catch(error => debug(error))
         sessions.delete(targetId)
       }
     }
@@ -107,6 +120,7 @@ async function initializeIntercept() {
 
   cdp.on('Fetch.requestPaused', async ({requestId, request, responseStatusCode, responseHeaders}, sessionId) => {
     try { // a failure here must not crash our app
+      // debug(responseStatusCode, request.method, request.url)
       switch (request.method) {
         default: return
         case 'POST': case 'GET':
@@ -134,7 +148,7 @@ async function initializeIntercept() {
 
   await cdp.ready
   logInfo('Connection successful!')
-
+  
   await cdp.send('Target.setDiscoverTargets', {
     discover: true, // turn on
     filter: [{type: 'page'}]
@@ -143,20 +157,19 @@ async function initializeIntercept() {
 
 function handle_attachment_json({url, headers, requestId, sessionId}) {
   if (headers.get('content-type') != 'image/jpeg') {
-    return log(`Bad content-type (${headers.get('content-type')}): ${request.method})`)
+    return debug(`Bad content-type (${headers.get('content-type')}): ${request.method})`)
   }
-  // const date = new Date(headers.get('date')) // not of image
   const imgId = url.searchParams.get('mediaId')
   if (archivedImages.has(imgId)) {
     return
   }
   cdp.send('Fetch.getResponseBody', {requestId}, sessionId).then(({body, base64Encoded}) => {
     if (!base64Encoded) {
-      return log(`Not base64Encoded: ${imgId}`)
+      return debug(`Not base64Encoded: ${imgId}`)
     }
     const imgData = Buffer.from(body, 'base64')
     if (imgData.byteLength == 0) {
-      return log(`Zero length: ${imgId}`) // then we could fetch them instead
+      return debug(`Zero length: ${imgId}`) // then we could fetch them instead
     }
     const {
       prompt = '', 
@@ -175,7 +188,7 @@ function handle_attachment_json({url, headers, requestId, sessionId}) {
         unixtime, imgId, prompt
       }, null, 2))
     }
-  })
+  }).catch(error => debug(error))
 }
 
 function handle_add_response_json({url, headers, requestId, sessionId}) {
@@ -185,7 +198,6 @@ function handle_add_response_json({url, headers, requestId, sessionId}) {
       body = Buffer.from(body, 'base64').toString()
     }
     let prompt, imgId
-    // console.log(body)
     const blocks = parseJsonBlocks(body)
     for (const block of blocks) {
       const {result} = block
@@ -197,10 +209,12 @@ function handle_add_response_json({url, headers, requestId, sessionId}) {
       }
     }
     if (imgId) {
-      // log(`Got prompt for ${imgId}: ${prompt}`)
+      debug(`Got prompt for ${imgId}: ${prompt}`)
       storedDetails.set(imgId, {prompt})
+    } else {
+      debug('add_response.json no img', body)
     }
-  })
+  }).catch(error => debug(error))
 }
 
 function handle_GrokConversationItemsByRestId({url, headers, requestId, sessionId}) {
@@ -212,7 +226,6 @@ function handle_GrokConversationItemsByRestId({url, headers, requestId, sessionI
     if (data?.data?.grok_conversation_items_by_rest_id?.items) {
       for (const {message, media_urls, created_at_ms} of data.data.grok_conversation_items_by_rest_id.items) {
         if (media_urls) {
-          // log('image found')
           for (const media_url of media_urls) {
             const start = media_url.lastIndexOf('mediaId=')
             if (start) {
@@ -221,13 +234,13 @@ function handle_GrokConversationItemsByRestId({url, headers, requestId, sessionI
               storedDetails.set(imgId, {
                 prompt, unixtime: Math.trunc(created_at_ms/1000)
               })
-              // log(imgId, prompt)
+              debug('found', imgId, prompt)
             }
           }
         }
       }
     }
-  })
+  }).catch(error => debug(error))
 }
 
 

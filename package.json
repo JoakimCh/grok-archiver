@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "grok-archiver",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "author": "Joakim L. Christiansen (https://joakimch.github.io)",
   "license": "MIT",
   "bin": "./grok-archiver.js",
@@ -15,6 +15,6 @@
     "archiver"
   ],
   "dependencies": {
-    "jlc-cdp": "^0.9.2"
+    "jlc-cdp": "^0.9.3"
   }
 }

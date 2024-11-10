@@ -18,40 +18,12 @@ const archivedImages = new Set()
 let cfg, cdp
 
 logInfo('Using grok-archiver version:', version)
-
-{ // check CLI arguments
-  if (process.argv.length > 2) {
-    process.argv.slice(2)
-    for (let i=2; i<process.argv.length; i++) {
-      const cmd = process.argv[i]
-      switch (cmd) {
-        case '-v': case '-V': case '--version':
-        process.exit()
-        case '-h': case '--help': 
-          logInfo(`Usage: [--config=location] \nSee https://github.com/JoakimCh/grok-archiver for more help.`)
-        process.exit()
-        default: {
-          if (cmd.startsWith('--config=')) {
-            const configPath = cmd.split('=')[1]
-            cfg = loadConfig(configPath)
-          } else {
-            logInfo(`Invalid CLI command: ${cmd}`)
-            process.exit(1)
-          }
-        }
-      }
-    }
-  }
-  if (!cfg) cfg = loadConfig() // from CWD
-  logInfo('Using archive directory:', cfg.archivePath)
-}
-
+handleCliArguments()
 try {
   detectArchivedImages() // by checking the DB records
 } catch {}
 logInfo(`Images archived: ${archivedImages.size}.`)
-
-await initializeIntercept()
+initializeIntercept()
 
 //#region The functions...
 
@@ -60,7 +32,7 @@ async function initializeIntercept() {
   const {info} = await (async () => {
     try {
       // see: https://github.com/JoakimCh/grok-archiver/issues/1
-      cfg.chromiumArgs = [`--auto-open-devtools-for-tabs`, `https://x.com/i/grok`]
+      cfg.chromiumArgs = [`https://x.com/i/grok`]
       return await initChrome(cfg)
     } catch (error) {
       if (error.toString().startsWith(`Error: Can't connect to the DevTools protocol`)) {
@@ -77,14 +49,17 @@ async function initializeIntercept() {
 
   cdp = new ChromeDevToolsProtocol({webSocketDebuggerUrl, debug: false})
 
-  cdp.on('close', () => logInfo(`The CDP WebSocket connection was closed. Please reconnect by running this program again (if you're not finished).`))
+  cdp.on('close', () => {
+    logInfo(`The CDP WebSocket connection was closed. Please reconnect by running this program again (if you're not finished).`)
+    process.exit()
+  })
 
   cdp.on('Target.targetCreated',     monitorTargetOrNot)
   cdp.on('Target.targetInfoChanged', monitorTargetOrNot)
 
-  async function monitorTargetOrNot({targetInfo: {targetId, url, type}}) {
+  function monitorTargetOrNot({targetInfo: {targetId, url, type}}) {
     // debug('monitor?', type, url)
-    if (type == 'page' && (url.startsWith('https://x.com/i/grok'))) {
+    const startMonitor = async (patterns) => {
       if (!sessions.has(targetId)) {
         debug('start monitor: ', targetId, url)
         const session = cdp.newSession({targetId})
@@ -95,21 +70,25 @@ async function initializeIntercept() {
         })
         try {
           await session.ready // any errors will throw here
+          session.send('Fetch.enable', {
+            patterns
+          }).catch(error => debug(error))
+          return session
         } catch (error) { // e.g. if target has been destroyed
           sessions.delete(targetId)
-          return
         }
-        // await session.send('Console.enable')
-        session.send('Fetch.enable', {
-          patterns: [
-            // {requestStage: 'Response'}, // all
-            // https://api.x.com/2/grok/add_response.json
-            {urlPattern: '*add_response.json', requestStage: 'Response'},
-            {urlPattern: '*attachment.json?mediaId*', requestStage: 'Response'},
-            {urlPattern: '*GrokConversationItemsByRestId*', requestStage: 'Response'},
-          ]
-        }).catch(error => debug(error))
       }
+    }
+    if (type == 'page' && (url.startsWith('https://x.com/i/grok'))) {
+      startMonitor([
+        {urlPattern: '*add_response.json', requestStage: 'Response'},
+        {urlPattern: '*attachment.json?mediaId*', requestStage: 'Response'},
+        {urlPattern: '*GrokConversationItemsByRestId*', requestStage: 'Response'},
+      ])
+    } else if (type == 'service_worker' && (url.startsWith('https://x.com'))) {
+      startMonitor([
+        {urlPattern: '*add_response.json', requestStage: 'Response'},
+      ])
     } else {
       if (sessions.has(targetId)) {
         sessions.get(targetId).detach().catch(error => debug(error))
@@ -126,7 +105,7 @@ async function initializeIntercept() {
         case 'POST': case 'GET':
       }
       if (responseStatusCode != 200) {
-        return log(`Bad response code ${responseStatusCode}): ${request.url}`)
+        return log(`Bad response code (${responseStatusCode}): ${request.url}`)
       }
       const headers = new Headers(responseHeaders.map(({name, value}) => [name, value]))
       const url = new URL(request.url)
@@ -151,7 +130,10 @@ async function initializeIntercept() {
   
   await cdp.send('Target.setDiscoverTargets', {
     discover: true, // turn on
-    filter: [{type: 'page'}]
+    filter: [
+      {type: 'page'},
+      {type: 'service_worker'}
+    ]
   })
 }
 
@@ -243,47 +225,48 @@ function handle_GrokConversationItemsByRestId({url, headers, requestId, sessionI
   }).catch(error => debug(error))
 }
 
-
-function parseJsonBlocks(text) {
-  if (!text.startsWith('{')) {
-    console.log('error, missing {')
-    return
-  }
-  const blocks = []
-  let open = 0, block = ''
-  for (let char of text) {
-    switch (char) {
-      case '\n': continue
-      case '{': open ++; break
-      case '}': open --; break
-    }
-    block += char
-    if (open == 0) {
-      // convert too large numbers into strings (we could also use BigInts)
-      block = block.replace(/(:\s*)(\d{16,})/g, (a,b,c) => {
-        if (!Number.isSafeInteger(+c)) {
-          return `${b}"${c}"`
-        } else {
-          return `${b}${c}`
-        }
-      })
-      blocks.push(JSON.parse(block))
-      block = ''
+function detectArchivedImages() {
+  const dirsToScan = [`${cfg.archivePath}/database`]
+  let path
+  while (path = dirsToScan.pop()) {
+    for (const entry of fs.readdirSync(path, {withFileTypes: true})) {
+      if (entry.isDirectory()) {
+        dirsToScan.push(path+'/'+entry.name)
+        continue
+      }
+      if (entry.isFile && entry.name.endsWith('.json')) {
+        const imgId = entry.name.slice(0, -5) // without .json
+        archivedImages.add(imgId)
+      }
     }
   }
-  return blocks
 }
 
-function pickPathThatExists(choices) {
-  for (let path of choices) {
-    if (process.platform == 'win32') {
-      // thanks to: https://stackoverflow.com/a/33017068/4216153
-      path = path.replace(/%([^%]+)%/g, (_, key) => process.env[key]).replaceAll('\\', '/')
-    }
-    if (fs.existsSync(path)) {
-      return path
+function handleCliArguments() {
+  if (process.argv.length > 2) {
+    process.argv.slice(2)
+    for (let i=2; i<process.argv.length; i++) {
+      const cmd = process.argv[i]
+      switch (cmd) {
+        case '-v': case '-V': case '--version':
+        process.exit()
+        case '-h': case '--help': 
+          logInfo(`Usage: [--config=location] \nSee https://github.com/JoakimCh/grok-archiver for more help.`)
+        process.exit()
+        default: {
+          if (cmd.startsWith('--config=')) {
+            const configPath = cmd.split('=')[1]
+            cfg = loadConfig(configPath)
+          } else {
+            logInfo(`Invalid CLI command: ${cmd}`)
+            process.exit(1)
+          }
+        }
+      }
     }
   }
+  if (!cfg) cfg = loadConfig() // from CWD
+  logInfo('Using archive directory:', cfg.archivePath)
 }
 
 function loadConfig(cfgPath = 'config.json') {
@@ -329,26 +312,51 @@ function loadConfig(cfgPath = 'config.json') {
   return cfg
 }
 
+function parseJsonBlocks(text) {
+  if (!text.startsWith('{')) {
+    console.log('error, missing {')
+    return
+  }
+  const blocks = []
+  let open = 0, block = ''
+  for (let char of text) {
+    switch (char) {
+      case '\n': continue
+      case '{': open ++; break
+      case '}': open --; break
+    }
+    block += char
+    if (open == 0) {
+      // convert too large numbers into strings (we could also use BigInts)
+      block = block.replace(/(:\s*)(\d{16,})/g, (a,b,c) => {
+        if (!Number.isSafeInteger(+c)) {
+          return `${b}"${c}"`
+        } else {
+          return `${b}${c}`
+        }
+      })
+      blocks.push(JSON.parse(block))
+      block = ''
+    }
+  }
+  return blocks
+}
+
+function pickPathThatExists(choices) {
+  for (let path of choices) {
+    if (process.platform == 'win32') {
+      // thanks to: https://stackoverflow.com/a/33017068/4216153
+      path = path.replace(/%([^%]+)%/g, (_, key) => process.env[key]).replaceAll('\\', '/')
+    }
+    if (fs.existsSync(path)) {
+      return path
+    }
+  }
+}
+
 function dateDir(unixTime) {
   const date = new Date(unixTime * 1000)
   return `${date.getFullYear()}/${date.getMonth()+1}/${date.getDate()}`
-}
-
-function detectArchivedImages() {
-  const dirsToScan = [`${cfg.archivePath}/database`]
-  let path
-  while (path = dirsToScan.pop()) {
-    for (const entry of fs.readdirSync(path, {withFileTypes: true})) {
-      if (entry.isDirectory()) {
-        dirsToScan.push(path+'/'+entry.name)
-        continue
-      }
-      if (entry.isFile && entry.name.endsWith('.json')) {
-        const imgId = entry.name.slice(0, -5) // without .json
-        archivedImages.add(imgId)
-      }
-    }
-  }
 }
 
 function ensureDirectory(filePath) {

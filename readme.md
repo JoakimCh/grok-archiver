@@ -19,8 +19,6 @@ It you experience any bugs or it not working properly on your operating system t
 
 I'll happily fix any bugs encountered, just create a new "issue" in the GitHub repository and document it there (and I'll probably figure out how to fix it soon).
 
-Currently there is an [issue](https://github.com/JoakimCh/grok-archiver/issues/1) which requires the DevTools panel to be open for it to work properly. Which is actually a Chromium bug!
-
 ## How to run it?
 
 You can run it using the [Node.js](https://nodejs.org/) package manager ([NPM](https://www.npmjs.com/)). To install NPM you'll have to install Node.js if you haven't done so already.
@@ -29,9 +27,9 @@ Then you should be able to run the archiver (in the current working directory) b
 ```sh
 npx grok-archiver
 ```
-Which will try to setup the archive in the directory where you ran the command, if no "config.json" file was there already it will first create one and exit.
+Which will try to setup the archive in the directory where you ran the command, if no "grok-archiver.json" file was there already it will first create one and exit.
 
-The "config.json" file it created looks something like this:
+The "grok-archiver.json" file it created looks something like this:
 ```json
 {
   "chromiumPath": "google-chrome",
